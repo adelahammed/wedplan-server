@@ -488,6 +488,242 @@ app.patch("/bookings/:id/status", verifyToken, verifyVendor, async (req, res) =>
   res.json({ success: true, message: `booking request ${status.toLowerCase()} successfully` });
 });
 
+app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
+  const totalUsers = await userCollection.countDocuments({});
+  const totalVendors = await userCollection.countDocuments({ role: { $regex: /^vendor$/i } });
+  const totalCustomers = await userCollection.countDocuments({ role: { $regex: /^customer$/i } });
+  const totalServices = await serviceCollection.countDocuments({});
+  const pendingServices = await serviceCollection.countDocuments({ status: { $regex: /^pending$/i } });
+  const totalTransactions = await transactionCollection.countDocuments({});
+
+  const recentTransactions = await transactionCollection.find({}).sort({ createdAt: -1 }).limit(5).toArray();
+
+  res.json({
+    totalUsers,
+    totalVendors,
+    totalCustomers,
+    totalServices,
+    pendingServices,
+    totalTransactions,
+    recentTransactions,
+  });
+});
+
+app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
+  const { search, status } = req.query;
+  const query = {};
+
+  if (status && status !== "All") {
+    query.status = { $regex: new RegExp(`^${status}$`, "i") };
+  }
+
+  if (search) {
+    query.$or = [
+      { name: { $regex: new RegExp(search, "i") } },
+      { category: { $regex: new RegExp(search, "i") } },
+      { location: { $regex: new RegExp(search, "i") } },
+      { vendorName: { $regex: new RegExp(search, "i") } },
+    ];
+  }
+
+  const result = await serviceCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
+app.patch("/services/:id/status", verifyToken, verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!status || !["active", "pending", "rejected", "inactive"].includes(status.toLowerCase())) {
+    return res.status(400).json({ message: "invalid status value" });
+  }
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid service id format" });
+  }
+
+  await serviceCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { status: status.toLowerCase(), updatedAt: new Date() } }
+  );
+
+  res.json({ success: true, message: `service status updated to ${status}` });
+});
+
+app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
+  const { search, role } = req.query;
+  const query = {};
+
+  if (role && role !== "All") {
+    query.role = { $regex: new RegExp(`^${role}$`, "i") };
+  }
+
+  if (search) {
+    query.$or = [
+      { name: { $regex: new RegExp(search, "i") } },
+      { email: { $regex: new RegExp(search, "i") } },
+    ];
+  }
+
+  const result = await userCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
+app.get("/users/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid user id format" });
+  }
+
+  const isSelf = req.user.id === id;
+  const isAdmin = req.user.role === "admin";
+
+  if (!isSelf && !isAdmin) {
+    return res.status(403).json({ message: "forbidden access to user details" });
+  }
+
+  const user = await userCollection.findOne({ _id: new ObjectId(id) });
+  if (!user) {
+    return res.status(404).json({ message: "user not found" });
+  }
+
+  const servicesCount = await serviceCollection.countDocuments({ vendorId: id });
+  const bookingsCount = await bookingCollection.countDocuments({ customerId: id });
+
+  res.json({
+    ...user,
+    servicesCount,
+    bookingsCount,
+  });
+});
+
+app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid user id format" });
+  }
+
+  const { isBlocked } = req.body;
+  await userCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { isBlocked: Boolean(isBlocked), updatedAt: new Date() } }
+  );
+
+  res.json({ success: true, message: `user block status updated to ${isBlocked}` });
+});
+
+app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid user id format" });
+  }
+
+  await userCollection.deleteOne({ _id: new ObjectId(id) });
+  res.json({ success: true, message: "user deleted successfully" });
+});
+
+app.get("/transactions", verifyToken, async (req, res) => {
+  const isAdmin = req.user.role === "admin";
+  const query = isAdmin ? {} : { vendorId: req.user.id };
+  const result = await transactionCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
+app.get("/vendor/stats/:vendorId", verifyToken, verifyVendor, async (req, res) => {
+  const { vendorId } = req.params;
+  if (req.user.role !== "admin" && req.user.id !== vendorId && req.user.email !== vendorId) {
+    return res.status(403).json({ message: "forbidden access" });
+  }
+
+  const totalServices = await serviceCollection.countDocuments({
+    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+  });
+  const activeServices = await serviceCollection.countDocuments({
+    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    status: { $regex: /^active$/i },
+  });
+  const pendingBookings = await bookingCollection.countDocuments({
+    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    status: { $regex: /^pending$/i },
+  });
+  const acceptedBookings = await bookingCollection.countDocuments({
+    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    status: { $regex: /^accepted$/i },
+  });
+
+  const vendorUser = await userCollection.findOne({
+    $or: [
+      ObjectId.isValid(vendorId) ? { _id: new ObjectId(vendorId) } : null,
+      { email: req.user.email },
+    ].filter(Boolean),
+  });
+
+  res.json({
+    totalServices,
+    activeServices,
+    pendingBookings,
+    acceptedBookings,
+    subscriptionPlan: vendorUser?.subscriptionPlan || "Free",
+  });
+});
+
+app.get("/customer/stats/:customerId", verifyToken, verifyCustomer, async (req, res) => {
+  const { customerId } = req.params;
+  if (req.user.role !== "admin" && req.user.id !== customerId && req.user.email !== customerId) {
+    return res.status(403).json({ message: "forbidden access" });
+  }
+
+  const totalBookings = await bookingCollection.countDocuments({
+    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+  });
+  const pendingBookings = await bookingCollection.countDocuments({
+    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+    status: { $regex: /^pending$/i },
+  });
+  const acceptedBookings = await bookingCollection.countDocuments({
+    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+    status: { $regex: /^accepted$/i },
+  });
+  const rejectedBookings = await bookingCollection.countDocuments({
+    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+    status: { $regex: /^rejected$/i },
+  });
+
+  res.json({
+    totalBookings,
+    pendingBookings,
+    acceptedBookings,
+    rejectedBookings,
+  });
+});
+
+app.patch("/users/profile/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid user id format" });
+  }
+
+  const isSelf = req.user.id === id;
+  const isAdmin = req.user.role === "admin";
+
+  if (!isSelf && !isAdmin) {
+    return res.status(403).json({ message: "forbidden: cannot modify profile of other users" });
+  }
+
+  const { name, image, businessName, phone, location, bio } = req.body;
+  const updates = {};
+  if (name !== undefined) updates.name = name;
+  if (image !== undefined) updates.image = image;
+  if (businessName !== undefined) updates.businessName = businessName;
+  if (phone !== undefined) updates.phone = phone;
+  if (location !== undefined) updates.location = location;
+  if (bio !== undefined) updates.bio = bio;
+  updates.updatedAt = new Date();
+
+  await userCollection.updateOne({ _id: new ObjectId(id) }, { $set: updates });
+  res.json({ success: true, message: "profile updated successfully" });
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
