@@ -138,6 +138,19 @@ app.get("/services/:id", async (req, res) => {
     _id: new ObjectId(serviceId),
   });
   if (result) {
+    if (result.vendorId) {
+      let vendorUser = null;
+      if (ObjectId.isValid(result.vendorId)) {
+        vendorUser = await userCollection.findOne({ _id: new ObjectId(result.vendorId) });
+      } else if (result.vendorEmail) {
+        vendorUser = await userCollection.findOne({ email: result.vendorEmail });
+      }
+      if (vendorUser) {
+        result.vendorName = result.vendorName || vendorUser.name;
+        result.vendorImage = result.vendorImage || vendorUser.image;
+        result.vendorEmail = result.vendorEmail || vendorUser.email;
+      }
+    }
     res.json(result);
   } else {
     res.status(404).json({ message: "service not found" });
