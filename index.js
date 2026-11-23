@@ -109,7 +109,7 @@ app.post("/jwt", async (req, res) => {
   res.json({ token });
 });
 
-app.get("/services", async (req, res) => {
+app.get("/services", verifyToken, verifyAdmin, async (req, res) => {
   const result = await serviceCollection.find({}).toArray();
   res.json(result);
 });
@@ -129,7 +129,7 @@ app.get("/services/vendor/:vendorId", verifyToken, verifyVendor, async (req, res
   res.json(result);
 });
 
-app.get("/services/:id", async (req, res) => {
+app.get("/services/:id", verifyToken, async (req, res) => {
   const serviceId = req.params.id;
   if (!ObjectId.isValid(serviceId)) {
     return res.status(400).json({ message: "invalid service id format" });
