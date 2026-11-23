@@ -114,6 +114,21 @@ app.get("/services", async (req, res) => {
   res.json(result);
 });
 
+app.get("/services/vendor/:vendorId", verifyToken, verifyVendor, async (req, res) => {
+  const { vendorId } = req.params;
+  if (req.user.role !== "admin" && req.user.id !== vendorId && req.user.email !== vendorId) {
+    return res.status(403).json({ message: "forbidden access to other vendor services" });
+  }
+  const query = {
+    $or: [
+      { vendorId: vendorId },
+      { vendorEmail: req.user.email }
+    ]
+  };
+  const result = await serviceCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
 app.get("/services/:id", async (req, res) => {
   const serviceId = req.params.id;
   if (!ObjectId.isValid(serviceId)) {
@@ -130,71 +145,188 @@ app.get("/services/:id", async (req, res) => {
 });
 
 app.get("/service-list", async (req, res) => {
-  const result = await serviceCollection
-    .aggregate([
-      {
-        $match: {
-          status: { $regex: /^active$/i },
-        },
-      },
-      {
-        $lookup: {
-          from: "user",
-          let: { vendorIdStr: "$vendorId" },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $eq: [{ $toString: "$_id" }, "$$vendorIdStr"],
-                },
+  const { search, category, location, sort } = req.query;
+  const matchStage = {
+    status: { $regex: /^active$/i },
+  };
+
+  if (category && category !== "All") {
+    matchStage.category = { $regex: new RegExp(`^${category}$`, "i") };
+  }
+
+  if (location && location !== "All") {
+    matchStage.location = { $regex: new RegExp(location, "i") };
+  }
+
+  if (search) {
+    matchStage.$or = [
+      { name: { $regex: new RegExp(search, "i") } },
+      { description: { $regex: new RegExp(search, "i") } },
+      { location: { $regex: new RegExp(search, "i") } },
+      { category: { $regex: new RegExp(search, "i") } },
+    ];
+  }
+
+  const pipeline = [
+    { $match: matchStage },
+    {
+      $lookup: {
+        from: "user",
+        let: { vendorIdStr: "$vendorId" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $eq: [{ $toString: "$_id" }, "$$vendorIdStr"],
               },
             },
-            {
-              $project: {
-                _id: 0,
-                name: 1,
-                image: 1,
-              },
+          },
+          {
+            $project: {
+              _id: 0,
+              name: 1,
+              image: 1,
             },
-          ],
-          as: "vendorInfo",
-        },
+          },
+        ],
+        as: "vendorInfo",
       },
-      {
-        $unwind: {
-          path: "$vendorInfo",
-          preserveNullAndEmptyArrays: true,
-        },
+    },
+    {
+      $unwind: {
+        path: "$vendorInfo",
+        preserveNullAndEmptyArrays: true,
       },
-      {
-        $project: {
-          _id: 1,
-          vendorId: 1,
-          vendorName: "$vendorInfo.name",
-          vendorImage: "$vendorInfo.image",
-          name: 1,
-          category: 1,
-          price: 1,
-          location: 1,
-          description: 1,
-          images: 1,
-          status: 1,
-          createdAt: 1,
-        },
+    },
+    {
+      $project: {
+        _id: 1,
+        vendorId: 1,
+        vendorName: { $ifNull: ["$vendorInfo.name", "$vendorName"] },
+        vendorImage: { $ifNull: ["$vendorInfo.image", "$vendorImage"] },
+        name: 1,
+        category: 1,
+        price: 1,
+        location: 1,
+        description: 1,
+        images: 1,
+        status: 1,
+        createdAt: 1,
       },
-    ])
-    .toArray();
+    },
+  ];
+
+  if (sort === "price-asc") {
+    pipeline.push({ $sort: { price: 1 } });
+  } else if (sort === "price-desc") {
+    pipeline.push({ $sort: { price: -1 } });
+  } else {
+    pipeline.push({ $sort: { createdAt: -1 } });
+  }
+
+  const result = await serviceCollection.aggregate(pipeline).toArray();
   res.json(result);
 });
 
-app.post("/services", async (req, res) => {
+app.post("/services", verifyToken, verifyVendor, async (req, res) => {
+  const vendorId = req.user.id;
+  const { name, category, price, location, description, images } = req.body;
+
+  if (!name || !category || !price || !location || !description) {
+    return res.status(400).json({ message: "all required fields must be provided" });
+  }
+
+  let vendorUser = null;
+  if (ObjectId.isValid(vendorId)) {
+    vendorUser = await userCollection.findOne({ _id: new ObjectId(vendorId) });
+  } else {
+    vendorUser = await userCollection.findOne({ email: req.user.email });
+  }
+
+  const isPremium = vendorUser?.subscriptionPlan?.toLowerCase() === "premium";
+  if (!isPremium) {
+    const activeCount = await serviceCollection.countDocuments({
+      vendorId: vendorId,
+      status: { $regex: /^active$/i },
+    });
+    if (activeCount >= 3) {
+      return res.status(403).json({
+        message: "Free vendors can publish a maximum of 3 active services. Please upgrade to Premium.",
+      });
+    }
+  }
+
   const newService = {
     ...req.body,
+    vendorId: vendorId,
+    vendorEmail: req.user.email,
+    vendorName: vendorUser?.name || req.body.vendorName || "Vendor",
+    vendorImage: vendorUser?.image || req.body.vendorImage || "",
+    images: Array.isArray(images) && images.length > 0 ? images : [images].filter(Boolean),
     status: "pending",
     createdAt: new Date(),
   };
+
   const result = await serviceCollection.insertOne(newService);
-  res.json(result);
+  res.status(201).json({ success: true, insertedId: result.insertedId });
+});
+
+app.patch("/services/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid service id format" });
+  }
+
+  const existing = await serviceCollection.findOne({ _id: new ObjectId(id) });
+  if (!existing) {
+    return res.status(404).json({ message: "service not found" });
+  }
+
+  const isOwner = req.user.id === existing.vendorId || req.user.email === existing.vendorEmail;
+  const isAdmin = req.user.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ message: "forbidden: cannot modify service of other vendors" });
+  }
+
+  const updates = {};
+  const allowed = ["name", "category", "price", "location", "description", "images", "status"];
+  for (const field of allowed) {
+    if (req.body[field] !== undefined) {
+      updates[field] = req.body[field];
+    }
+  }
+
+  if (!isAdmin && updates.status && !["active", "inactive"].includes(updates.status.toLowerCase())) {
+    delete updates.status;
+  }
+
+  updates.updatedAt = new Date();
+
+  await serviceCollection.updateOne({ _id: new ObjectId(id) }, { $set: updates });
+  res.json({ success: true, message: "service updated successfully" });
+});
+
+app.delete("/services/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid service id format" });
+  }
+
+  const existing = await serviceCollection.findOne({ _id: new ObjectId(id) });
+  if (!existing) {
+    return res.status(404).json({ message: "service not found" });
+  }
+
+  const isOwner = req.user.id === existing.vendorId || req.user.email === existing.vendorEmail;
+  const isAdmin = req.user.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ message: "forbidden: cannot delete service of other vendors" });
+  }
+
+  await serviceCollection.deleteOne({ _id: new ObjectId(id) });
+  res.json({ success: true, message: "service deleted successfully" });
 });
 
 app.listen(PORT, () => {
