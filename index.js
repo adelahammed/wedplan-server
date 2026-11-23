@@ -2,10 +2,13 @@ import { MongoClient, ObjectId } from "mongodb";
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
+import Stripe from "stripe";
 import "dotenv/config";
 
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || "wedplan_secret_jwt_key_2026";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 app.use(cors());
@@ -29,6 +32,7 @@ const serviceCollection = db.collection("services");
 const userCollection = db.collection("user");
 const bookingCollection = db.collection("bookings");
 const transactionCollection = db.collection("transactions");
+const paymentCollection = db.collection("payments");
 
 export const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -256,7 +260,7 @@ app.post("/services", verifyToken, verifyVendor, async (req, res) => {
     vendorUser = await userCollection.findOne({ email: req.user.email });
   }
 
-  const isPremium = vendorUser?.subscriptionPlan?.toLowerCase() === "premium";
+  const isPremium = vendorUser?.subscriptionPlan?.toLowerCase() === "premium" || vendorUser?.premium === true;
   if (!isPremium) {
     const activeCount = await serviceCollection.countDocuments({
       vendorId: vendorId,
@@ -635,6 +639,130 @@ app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   res.json({ success: true, message: "user deleted successfully" });
 });
 
+app.post("/payments/checkout-verify", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      return res.send({
+        success: false,
+        message: "Session ID is required"
+      });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    const {
+      status,
+      payment_status,
+      customer_email,
+      customer_details,
+      metadata,
+      payment_intent,
+      amount_total,
+      currency
+    } = session;
+
+    if (status === "complete" && payment_status === "paid") {
+      const sessionQuery = { sessionId };
+      const existingPayment = await paymentCollection.findOne(sessionQuery);
+
+      if (existingPayment) {
+        return res.send({
+          success: true,
+          alreadyVerified: true,
+          message: "Payment already verified",
+          payment: existingPayment,
+          session: {
+            id: sessionId,
+            status,
+            payment_status,
+            customer_email: customer_email || customer_details?.email,
+            customer_name: customer_details?.name,
+            amount_total,
+            currency,
+            plan: metadata?.plan || "Platinum Signature",
+            payment_intent
+          }
+        });
+      }
+
+      const payment = {
+        sessionId,
+        status,
+        payment_status,
+        customer_email: customer_email || customer_details?.email || "",
+        userId: metadata?.userId || "",
+        payment_date: new Date(),
+        payment_intent
+      };
+
+      const result = await paymentCollection.insertOne(payment);
+
+      const userId = metadata?.userId;
+      let query = {};
+      if (userId && ObjectId.isValid(userId)) {
+        query = { _id: new ObjectId(userId) };
+      } else if (userId) {
+        query = { _id: userId };
+      } else if (customer_email || customer_details?.email) {
+        query = { email: customer_email || customer_details?.email };
+      }
+
+      const updatedDoc = {
+        $set: {
+          premium: true,
+          subscriptionPlan: "Premium",
+          subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          updatedAt: new Date()
+        }
+      };
+
+      const updateResult = await userCollection.updateOne(query, updatedDoc);
+
+      await transactionCollection.insertOne({
+        vendorId: metadata?.userId || "",
+        customer_email: customer_email || customer_details?.email || "",
+        sessionId,
+        amount: amount_total ? amount_total / 100 : 150,
+        currency: currency || "usd",
+        plan: metadata?.plan || "Platinum Signature",
+        status: "completed",
+        createdAt: new Date()
+      });
+
+      return res.send({
+        success: true,
+        result,
+        updateResult,
+        session: {
+          id: sessionId,
+          status,
+          payment_status,
+          customer_email: customer_email || customer_details?.email,
+          customer_name: customer_details?.name,
+          amount_total,
+          currency,
+          plan: metadata?.plan || "Platinum Signature",
+          payment_intent
+        }
+      });
+    }
+
+    res.send({
+      success: false,
+      message: "Payment verification failed"
+    });
+  } catch (error) {
+    console.error("Payment verification error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Internal server error"
+    });
+  }
+});
+
 app.get("/transactions", verifyToken, async (req, res) => {
   const isAdmin = req.user.role === "admin";
   const query = isAdmin ? {} : { vendorId: req.user.id };
@@ -676,7 +804,7 @@ app.get("/vendor/stats/:vendorId", verifyToken, verifyVendor, async (req, res) =
     activeServices,
     pendingBookings,
     acceptedBookings,
-    subscriptionPlan: vendorUser?.subscriptionPlan || "Free",
+    subscriptionPlan: vendorUser?.subscriptionPlan || (vendorUser?.premium ? "Premium" : "Free"),
   });
 });
 
