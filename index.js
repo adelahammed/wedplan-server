@@ -1,4 +1,4 @@
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -26,7 +26,72 @@ const db = connectDB.db("wedplan");
 const serviceCollection = db.collection("services");
 
 app.get("/services", async (req, res) => {
-  const result = await testcollection.find({}).toArray();
+  const result = await serviceCollection.find({}).toArray();
+  res.json(result);
+});
+
+app.get("/services/:id", async (req, res) => {
+  const serviceId = req.params.id;
+  const result = await serviceCollection.findOne({
+    _id: new ObjectId(serviceId),
+  });
+  if (result) {
+    res.json(result);
+  } else {
+    res.status(404).json({ message: "service not found" });
+  }
+});
+
+app.get("/service-list", async (req, res) => {
+  const result = await serviceCollection
+    .aggregate([
+      {
+        $lookup: {
+          from: "user",
+          let: { vendorIdStr: "$vendorId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: "$_id" }, "$$vendorIdStr"],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                name: 1,
+                image: 1,
+              },
+            },
+          ],
+          as: "vendorInfo",
+        },
+      },
+      {
+        $unwind: {
+          path: "$vendorInfo",
+          preserveNullAndEmptyArrays: true, // keeps service even if vendor isn't found
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          vendorId: 1,
+          vendorName: "$vendorInfo.name",
+          vendorImage: "$vendorInfo.image",
+          name: 1,
+          category: 1,
+          price: 1,
+          location: 1,
+          description: 1,
+          images: 1,
+          status: 1,
+          createdAt: 1,
+        },
+      },
+    ])
+    .toArray();
   res.json(result);
 });
 
