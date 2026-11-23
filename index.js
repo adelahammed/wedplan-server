@@ -329,6 +329,165 @@ app.delete("/services/:id", verifyToken, async (req, res) => {
   res.json({ success: true, message: "service deleted successfully" });
 });
 
+app.post("/bookings", verifyToken, async (req, res) => {
+  if (req.user.role === "admin") {
+    return res.status(403).json({ message: "Admins cannot submit customer booking requests" });
+  }
+
+  const { serviceId, eventDate, eventLocation, message } = req.body;
+  if (!serviceId || !eventDate || !eventLocation) {
+    return res.status(400).json({ message: "service, event date, and location are required" });
+  }
+
+  if (!ObjectId.isValid(serviceId)) {
+    return res.status(400).json({ message: "invalid service id format" });
+  }
+
+  const service = await serviceCollection.findOne({ _id: new ObjectId(serviceId) });
+  if (!service) {
+    return res.status(404).json({ message: "service not found" });
+  }
+
+  if (service.status?.toLowerCase() !== "active") {
+    return res.status(400).json({ message: "Only approved and active services are available for booking" });
+  }
+
+  if (service.vendorId === req.user.id || service.vendorEmail === req.user.email) {
+    return res.status(400).json({ message: "Vendors cannot book their own services" });
+  }
+
+  const existingBooking = await bookingCollection.findOne({
+    serviceId: serviceId,
+    eventDate: eventDate,
+    status: { $in: ["Pending", "Accepted", "pending", "accepted"] },
+  });
+
+  if (existingBooking) {
+    return res.status(400).json({
+      message: "An active booking request already exists for this service on the selected date",
+    });
+  }
+
+  let customerUser = null;
+  if (ObjectId.isValid(req.user.id)) {
+    customerUser = await userCollection.findOne({ _id: new ObjectId(req.user.id) });
+  } else {
+    customerUser = await userCollection.findOne({ email: req.user.email });
+  }
+
+  const newBooking = {
+    serviceId: serviceId,
+    serviceName: service.name,
+    serviceImage: Array.isArray(service.images) && service.images.length > 0 ? service.images[0] : service.image || "",
+    category: service.category,
+    price: service.price,
+    vendorId: service.vendorId,
+    vendorName: service.vendorName,
+    vendorEmail: service.vendorEmail,
+    customerId: req.user.id,
+    customerName: customerUser?.name || req.body.customerName || "Customer",
+    customerEmail: req.user.email,
+    eventDate,
+    eventLocation,
+    message: message || "",
+    status: "pending",
+    createdAt: new Date(),
+  };
+
+  const result = await bookingCollection.insertOne(newBooking);
+  res.status(201).json({ success: true, insertedId: result.insertedId });
+});
+
+app.get("/bookings/customer/:customerId", verifyToken, async (req, res) => {
+  const { customerId } = req.params;
+  const isAuthorized = req.user.role === "admin" || req.user.id === customerId || req.user.email === customerId;
+  if (!isAuthorized) {
+    return res.status(403).json({ message: "forbidden access to customer bookings" });
+  }
+
+  const query = {
+    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+  };
+  const result = await bookingCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
+app.get("/bookings/vendor/:vendorId", verifyToken, verifyVendor, async (req, res) => {
+  const { vendorId } = req.params;
+  const isAuthorized = req.user.role === "admin" || req.user.id === vendorId || req.user.email === vendorId;
+  if (!isAuthorized) {
+    return res.status(403).json({ message: "forbidden access to vendor bookings" });
+  }
+
+  const query = {
+    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+  };
+  const result = await bookingCollection.find(query).sort({ createdAt: -1 }).toArray();
+  res.json(result);
+});
+
+app.patch("/bookings/:id/cancel", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid booking id format" });
+  }
+
+  const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
+  if (!booking) {
+    return res.status(404).json({ message: "booking not found" });
+  }
+
+  const isOwner = booking.customerId === req.user.id || booking.customerEmail === req.user.email;
+  if (!isOwner && req.user.role !== "admin") {
+    return res.status(403).json({ message: "forbidden: customers cannot modify or cancel another customer's bookings" });
+  }
+
+  if (booking.status?.toLowerCase() !== "pending") {
+    return res.status(400).json({
+      message: "Customers cannot cancel an already accepted, rejected, or cancelled booking",
+    });
+  }
+
+  await bookingCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { status: "cancelled", updatedAt: new Date() } }
+  );
+  res.json({ success: true, message: "booking cancelled successfully" });
+});
+
+app.patch("/bookings/:id/status", verifyToken, verifyVendor, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!status || !["accepted", "rejected"].includes(status.toLowerCase())) {
+    return res.status(400).json({ message: "status must be either accepted or rejected" });
+  }
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "invalid booking id format" });
+  }
+
+  const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
+  if (!booking) {
+    return res.status(404).json({ message: "booking not found" });
+  }
+
+  const isOwner = booking.vendorId === req.user.id || booking.vendorEmail === req.user.email;
+  if (!isOwner && req.user.role !== "admin") {
+    return res.status(403).json({ message: "vendors cannot modify booking requests belonging to other vendors" });
+  }
+
+  if (booking.status?.toLowerCase() !== "pending") {
+    return res.status(400).json({ message: "once accepted or rejected, a request cannot be processed again" });
+  }
+
+  await bookingCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { status: status.toLowerCase(), updatedAt: new Date() } }
+  );
+  res.json({ success: true, message: `booking request ${status.toLowerCase()} successfully` });
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
