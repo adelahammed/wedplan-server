@@ -23,10 +23,20 @@ export async function connectToMongoDB() {
 const connectDB = await connectToMongoDB();
 
 const db = connectDB.db("wedplan");
-const testcollection = db.collection("test");
+const serviceCollection = db.collection("services");
 
-app.get("/test", async (req, res) => {
+app.get("/services", async (req, res) => {
   const result = await testcollection.find({}).toArray();
+  res.json(result);
+});
+
+app.post("/services", async (req, res) => {
+  const newService = {
+    ...req.body,
+    status: "pending",
+    createdAt: new Date(),
+  };
+  const result = await serviceCollection.insertOne(newService);
   res.json(result);
 });
 
