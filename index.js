@@ -14,8 +14,19 @@ const JWT_SECRET =
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
 app.use(express.json());
+app.use((req, res, next) => {
+  if (req.url.length > 1 && req.url.includes("//")) {
+    req.url = req.url.replace(/\/{2,}/g, "/");
+  }
+  next();
+});
 
 const client = new MongoClient(process.env.MONGODB_URL);
 
