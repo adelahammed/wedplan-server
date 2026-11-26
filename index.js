@@ -6,7 +6,10 @@ import Stripe from "stripe";
 import "dotenv/config";
 
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || "wedplan_secret_jwt_key_2026";
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  process.env.ACCESS_TOKEN_SECRET ||
+  "wedplan_secret_jwt_key_2026";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -52,7 +55,9 @@ export const verifyToken = async (req, res, next) => {
       }
       const existingUser = await userCollection.findOne(query);
       if (existingUser?.isBlocked) {
-        return res.status(403).json({ message: "forbidden: account is blocked" });
+        return res
+          .status(403)
+          .json({ message: "forbidden: account is blocked" });
       }
       if (existingUser?.role) {
         req.user.role = existingUser.role.toLowerCase();
@@ -108,7 +113,7 @@ app.post("/jwt", async (req, res) => {
   const token = jwt.sign(
     { email, role: userRole.toLowerCase(), id: userId },
     JWT_SECRET,
-    { expiresIn: "7d" }
+    { expiresIn: "7d" },
   );
   res.json({ token });
 });
@@ -118,20 +123,31 @@ app.get("/services", verifyToken, verifyAdmin, async (req, res) => {
   res.json(result);
 });
 
-app.get("/services/vendor/:vendorId", verifyToken, verifyVendor, async (req, res) => {
-  const { vendorId } = req.params;
-  if (req.user.role !== "admin" && req.user.id !== vendorId && req.user.email !== vendorId) {
-    return res.status(403).json({ message: "forbidden access to other vendor services" });
-  }
-  const query = {
-    $or: [
-      { vendorId: vendorId },
-      { vendorEmail: req.user.email }
-    ]
-  };
-  const result = await serviceCollection.find(query).sort({ createdAt: -1 }).toArray();
-  res.json(result);
-});
+app.get(
+  "/services/vendor/:vendorId",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    const { vendorId } = req.params;
+    if (
+      req.user.role !== "admin" &&
+      req.user.id !== vendorId &&
+      req.user.email !== vendorId
+    ) {
+      return res
+        .status(403)
+        .json({ message: "forbidden access to other vendor services" });
+    }
+    const query = {
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    };
+    const result = await serviceCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.json(result);
+  },
+);
 
 app.get("/services/:id", verifyToken, async (req, res) => {
   const serviceId = req.params.id;
@@ -145,9 +161,13 @@ app.get("/services/:id", verifyToken, async (req, res) => {
     if (result.vendorId) {
       let vendorUser = null;
       if (ObjectId.isValid(result.vendorId)) {
-        vendorUser = await userCollection.findOne({ _id: new ObjectId(result.vendorId) });
+        vendorUser = await userCollection.findOne({
+          _id: new ObjectId(result.vendorId),
+        });
       } else if (result.vendorEmail) {
-        vendorUser = await userCollection.findOne({ email: result.vendorEmail });
+        vendorUser = await userCollection.findOne({
+          email: result.vendorEmail,
+        });
       }
       if (vendorUser) {
         result.vendorName = result.vendorName || vendorUser.name;
@@ -250,7 +270,9 @@ app.post("/services", verifyToken, verifyVendor, async (req, res) => {
   const { name, category, price, location, description, images } = req.body;
 
   if (!name || !category || !price || !location || !description) {
-    return res.status(400).json({ message: "all required fields must be provided" });
+    return res
+      .status(400)
+      .json({ message: "all required fields must be provided" });
   }
 
   let vendorUser = null;
@@ -260,15 +282,18 @@ app.post("/services", verifyToken, verifyVendor, async (req, res) => {
     vendorUser = await userCollection.findOne({ email: req.user.email });
   }
 
-  const isPremium = vendorUser?.subscriptionPlan?.toLowerCase() === "premium" || vendorUser?.premium === true;
+  const isPremium =
+    vendorUser?.subscriptionPlan?.toLowerCase() === "premium" ||
+    vendorUser?.premium === true;
   if (!isPremium) {
-    const activeCount = await serviceCollection.countDocuments({
-      vendorId: vendorId,
-      status: { $regex: /^active$/i },
+    const totalCount = await serviceCollection.countDocuments({
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
     });
-    if (activeCount >= 3) {
+    if (totalCount >= 3) {
       return res.status(403).json({
-        message: "Free vendors can publish a maximum of 3 active services. Please upgrade to Premium.",
+        message:
+          "Free vendors can publish a maximum of 3 services. Please upgrade to Premium.",
+        limitReached: true,
       });
     }
   }
@@ -279,7 +304,10 @@ app.post("/services", verifyToken, verifyVendor, async (req, res) => {
     vendorEmail: req.user.email,
     vendorName: vendorUser?.name || req.body.vendorName || "Vendor",
     vendorImage: vendorUser?.image || req.body.vendorImage || "",
-    images: Array.isArray(images) && images.length > 0 ? images : [images].filter(Boolean),
+    images:
+      Array.isArray(images) && images.length > 0
+        ? images
+        : [images].filter(Boolean),
     status: "pending",
     createdAt: new Date(),
   };
@@ -299,28 +327,51 @@ app.patch("/services/:id", verifyToken, async (req, res) => {
     return res.status(404).json({ message: "service not found" });
   }
 
-  const isOwner = req.user.id === existing.vendorId || req.user.email === existing.vendorEmail;
+  const isOwner =
+    req.user.id === existing.vendorId ||
+    req.user.email === existing.vendorEmail;
   const isAdmin = req.user.role === "admin";
 
   if (!isOwner && !isAdmin) {
-    return res.status(403).json({ message: "forbidden: cannot modify service of other vendors" });
+    return res
+      .status(403)
+      .json({ message: "forbidden: cannot modify service of other vendors" });
   }
 
   const updates = {};
-  const allowed = ["name", "category", "price", "location", "description", "images", "status"];
+  const allowed = [
+    "name",
+    "category",
+    "price",
+    "location",
+    "description",
+    "images",
+    "status",
+  ];
   for (const field of allowed) {
     if (req.body[field] !== undefined) {
       updates[field] = req.body[field];
     }
   }
 
-  if (!isAdmin && updates.status && !["active", "inactive"].includes(updates.status.toLowerCase())) {
-    delete updates.status;
+  if (!isAdmin && updates.status) {
+    const nextStatus = updates.status.toLowerCase();
+    const currentStatus = (existing.status || "").toLowerCase();
+    if (currentStatus === "pending" || currentStatus === "rejected") {
+      delete updates.status;
+    } else if (["active", "paused", "inactive"].includes(nextStatus)) {
+      updates.status = nextStatus === "active" ? "active" : "paused";
+    } else {
+      delete updates.status;
+    }
   }
 
   updates.updatedAt = new Date();
 
-  await serviceCollection.updateOne({ _id: new ObjectId(id) }, { $set: updates });
+  await serviceCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: updates },
+  );
   res.json({ success: true, message: "service updated successfully" });
 });
 
@@ -335,11 +386,15 @@ app.delete("/services/:id", verifyToken, async (req, res) => {
     return res.status(404).json({ message: "service not found" });
   }
 
-  const isOwner = req.user.id === existing.vendorId || req.user.email === existing.vendorEmail;
+  const isOwner =
+    req.user.id === existing.vendorId ||
+    req.user.email === existing.vendorEmail;
   const isAdmin = req.user.role === "admin";
 
   if (!isOwner && !isAdmin) {
-    return res.status(403).json({ message: "forbidden: cannot delete service of other vendors" });
+    return res
+      .status(403)
+      .json({ message: "forbidden: cannot delete service of other vendors" });
   }
 
   await serviceCollection.deleteOne({ _id: new ObjectId(id) });
@@ -348,29 +403,44 @@ app.delete("/services/:id", verifyToken, async (req, res) => {
 
 app.post("/bookings", verifyToken, async (req, res) => {
   if (req.user.role === "admin") {
-    return res.status(403).json({ message: "Admins cannot submit customer booking requests" });
+    return res
+      .status(403)
+      .json({ message: "Admins cannot submit customer booking requests" });
   }
 
   const { serviceId, eventDate, eventLocation, message } = req.body;
   if (!serviceId || !eventDate || !eventLocation) {
-    return res.status(400).json({ message: "service, event date, and location are required" });
+    return res
+      .status(400)
+      .json({ message: "service, event date, and location are required" });
   }
 
   if (!ObjectId.isValid(serviceId)) {
     return res.status(400).json({ message: "invalid service id format" });
   }
 
-  const service = await serviceCollection.findOne({ _id: new ObjectId(serviceId) });
+  const service = await serviceCollection.findOne({
+    _id: new ObjectId(serviceId),
+  });
   if (!service) {
     return res.status(404).json({ message: "service not found" });
   }
 
   if (service.status?.toLowerCase() !== "active") {
-    return res.status(400).json({ message: "Only approved and active services are available for booking" });
+    return res
+      .status(400)
+      .json({
+        message: "Only approved and active services are available for booking",
+      });
   }
 
-  if (service.vendorId === req.user.id || service.vendorEmail === req.user.email) {
-    return res.status(400).json({ message: "Vendors cannot book their own services" });
+  if (
+    service.vendorId === req.user.id ||
+    service.vendorEmail === req.user.email
+  ) {
+    return res
+      .status(400)
+      .json({ message: "Vendors cannot book their own services" });
   }
 
   const existingBooking = await bookingCollection.findOne({
@@ -381,13 +451,16 @@ app.post("/bookings", verifyToken, async (req, res) => {
 
   if (existingBooking) {
     return res.status(400).json({
-      message: "An active booking request already exists for this service on the selected date",
+      message:
+        "An active booking request already exists for this service on the selected date",
     });
   }
 
   let customerUser = null;
   if (ObjectId.isValid(req.user.id)) {
-    customerUser = await userCollection.findOne({ _id: new ObjectId(req.user.id) });
+    customerUser = await userCollection.findOne({
+      _id: new ObjectId(req.user.id),
+    });
   } else {
     customerUser = await userCollection.findOne({ email: req.user.email });
   }
@@ -395,7 +468,10 @@ app.post("/bookings", verifyToken, async (req, res) => {
   const newBooking = {
     serviceId: serviceId,
     serviceName: service.name,
-    serviceImage: Array.isArray(service.images) && service.images.length > 0 ? service.images[0] : service.image || "",
+    serviceImage:
+      Array.isArray(service.images) && service.images.length > 0
+        ? service.images[0]
+        : service.image || "",
     category: service.category,
     price: service.price,
     vendorId: service.vendorId,
@@ -417,31 +493,52 @@ app.post("/bookings", verifyToken, async (req, res) => {
 
 app.get("/bookings/customer/:customerId", verifyToken, async (req, res) => {
   const { customerId } = req.params;
-  const isAuthorized = req.user.role === "admin" || req.user.id === customerId || req.user.email === customerId;
+  const isAuthorized =
+    req.user.role === "admin" ||
+    req.user.id === customerId ||
+    req.user.email === customerId;
   if (!isAuthorized) {
-    return res.status(403).json({ message: "forbidden access to customer bookings" });
+    return res
+      .status(403)
+      .json({ message: "forbidden access to customer bookings" });
   }
 
   const query = {
     $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
   };
-  const result = await bookingCollection.find(query).sort({ createdAt: -1 }).toArray();
+  const result = await bookingCollection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
   res.json(result);
 });
 
-app.get("/bookings/vendor/:vendorId", verifyToken, verifyVendor, async (req, res) => {
-  const { vendorId } = req.params;
-  const isAuthorized = req.user.role === "admin" || req.user.id === vendorId || req.user.email === vendorId;
-  if (!isAuthorized) {
-    return res.status(403).json({ message: "forbidden access to vendor bookings" });
-  }
+app.get(
+  "/bookings/vendor/:vendorId",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    const { vendorId } = req.params;
+    const isAuthorized =
+      req.user.role === "admin" ||
+      req.user.id === vendorId ||
+      req.user.email === vendorId;
+    if (!isAuthorized) {
+      return res
+        .status(403)
+        .json({ message: "forbidden access to vendor bookings" });
+    }
 
-  const query = {
-    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
-  };
-  const result = await bookingCollection.find(query).sort({ createdAt: -1 }).toArray();
-  res.json(result);
-});
+    const query = {
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    };
+    const result = await bookingCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.json(result);
+  },
+);
 
 app.patch("/bookings/:id/cancel", verifyToken, async (req, res) => {
   const { id } = req.params;
@@ -454,66 +551,106 @@ app.patch("/bookings/:id/cancel", verifyToken, async (req, res) => {
     return res.status(404).json({ message: "booking not found" });
   }
 
-  const isOwner = booking.customerId === req.user.id || booking.customerEmail === req.user.email;
+  const isOwner =
+    booking.customerId === req.user.id ||
+    booking.customerEmail === req.user.email;
   if (!isOwner && req.user.role !== "admin") {
-    return res.status(403).json({ message: "forbidden: customers cannot modify or cancel another customer's bookings" });
+    return res
+      .status(403)
+      .json({
+        message:
+          "forbidden: customers cannot modify or cancel another customer's bookings",
+      });
   }
 
   if (booking.status?.toLowerCase() !== "pending") {
     return res.status(400).json({
-      message: "Customers cannot cancel an already accepted, rejected, or cancelled booking",
+      message:
+        "Customers cannot cancel an already accepted, rejected, or cancelled booking",
     });
   }
 
   await bookingCollection.updateOne(
     { _id: new ObjectId(id) },
-    { $set: { status: "cancelled", updatedAt: new Date() } }
+    { $set: { status: "cancelled", updatedAt: new Date() } },
   );
   res.json({ success: true, message: "booking cancelled successfully" });
 });
 
-app.patch("/bookings/:id/status", verifyToken, verifyVendor, async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
+app.patch(
+  "/bookings/:id/status",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
 
-  if (!status || !["accepted", "rejected"].includes(status.toLowerCase())) {
-    return res.status(400).json({ message: "status must be either accepted or rejected" });
-  }
+    if (!status || !["accepted", "rejected"].includes(status.toLowerCase())) {
+      return res
+        .status(400)
+        .json({ message: "status must be either accepted or rejected" });
+    }
 
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).json({ message: "invalid booking id format" });
-  }
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "invalid booking id format" });
+    }
 
-  const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
-  if (!booking) {
-    return res.status(404).json({ message: "booking not found" });
-  }
+    const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
+    if (!booking) {
+      return res.status(404).json({ message: "booking not found" });
+    }
 
-  const isOwner = booking.vendorId === req.user.id || booking.vendorEmail === req.user.email;
-  if (!isOwner && req.user.role !== "admin") {
-    return res.status(403).json({ message: "vendors cannot modify booking requests belonging to other vendors" });
-  }
+    const isOwner =
+      booking.vendorId === req.user.id ||
+      booking.vendorEmail === req.user.email;
+    if (!isOwner && req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({
+          message:
+            "vendors cannot modify booking requests belonging to other vendors",
+        });
+    }
 
-  if (booking.status?.toLowerCase() !== "pending") {
-    return res.status(400).json({ message: "once accepted or rejected, a request cannot be processed again" });
-  }
+    if (booking.status?.toLowerCase() !== "pending") {
+      return res
+        .status(400)
+        .json({
+          message:
+            "once accepted or rejected, a request cannot be processed again",
+        });
+    }
 
-  await bookingCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { status: status.toLowerCase(), updatedAt: new Date() } }
-  );
-  res.json({ success: true, message: `booking request ${status.toLowerCase()} successfully` });
-});
+    await bookingCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: status.toLowerCase(), updatedAt: new Date() } },
+    );
+    res.json({
+      success: true,
+      message: `booking request ${status.toLowerCase()} successfully`,
+    });
+  },
+);
 
 app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
   const totalUsers = await userCollection.countDocuments({});
-  const totalVendors = await userCollection.countDocuments({ role: { $regex: /^vendor$/i } });
-  const totalCustomers = await userCollection.countDocuments({ role: { $regex: /^customer$/i } });
+  const totalVendors = await userCollection.countDocuments({
+    role: { $regex: /^vendor$/i },
+  });
+  const totalCustomers = await userCollection.countDocuments({
+    role: { $regex: /^customer$/i },
+  });
   const totalServices = await serviceCollection.countDocuments({});
-  const pendingServices = await serviceCollection.countDocuments({ status: { $regex: /^pending$/i } });
+  const pendingServices = await serviceCollection.countDocuments({
+    status: { $regex: /^pending$/i },
+  });
   const totalTransactions = await transactionCollection.countDocuments({});
 
-  const recentTransactions = await transactionCollection.find({}).sort({ createdAt: -1 }).limit(5).toArray();
+  const recentTransactions = await transactionCollection
+    .find({})
+    .sort({ createdAt: -1 })
+    .limit(5)
+    .toArray();
 
   res.json({
     totalUsers,
@@ -543,29 +680,42 @@ app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
     ];
   }
 
-  const result = await serviceCollection.find(query).sort({ createdAt: -1 }).toArray();
+  const result = await serviceCollection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
   res.json(result);
 });
 
-app.patch("/services/:id/status", verifyToken, verifyAdmin, async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
+app.patch(
+  "/services/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
 
-  if (!status || !["active", "pending", "rejected", "inactive"].includes(status.toLowerCase())) {
-    return res.status(400).json({ message: "invalid status value" });
-  }
+    if (
+      !status ||
+      !["active", "pending", "rejected", "paused", "inactive"].includes(
+        status.toLowerCase(),
+      )
+    ) {
+      return res.status(400).json({ message: "invalid status value" });
+    }
 
-  if (!ObjectId.isValid(id)) {
-    return res.status(400).json({ message: "invalid service id format" });
-  }
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "invalid service id format" });
+    }
 
-  await serviceCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { status: status.toLowerCase(), updatedAt: new Date() } }
-  );
+    await serviceCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: status.toLowerCase(), updatedAt: new Date() } },
+    );
 
-  res.json({ success: true, message: `service status updated to ${status}` });
-});
+    res.json({ success: true, message: `service status updated to ${status}` });
+  },
+);
 
 app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
   const { search, role } = req.query;
@@ -582,7 +732,10 @@ app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
     ];
   }
 
-  const result = await userCollection.find(query).sort({ createdAt: -1 }).toArray();
+  const result = await userCollection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
   res.json(result);
 });
 
@@ -596,7 +749,9 @@ app.get("/users/:id", verifyToken, async (req, res) => {
   const isAdmin = req.user.role === "admin";
 
   if (!isSelf && !isAdmin) {
-    return res.status(403).json({ message: "forbidden access to user details" });
+    return res
+      .status(403)
+      .json({ message: "forbidden access to user details" });
   }
 
   const user = await userCollection.findOne({ _id: new ObjectId(id) });
@@ -604,8 +759,12 @@ app.get("/users/:id", verifyToken, async (req, res) => {
     return res.status(404).json({ message: "user not found" });
   }
 
-  const servicesCount = await serviceCollection.countDocuments({ vendorId: id });
-  const bookingsCount = await bookingCollection.countDocuments({ customerId: id });
+  const servicesCount = await serviceCollection.countDocuments({
+    vendorId: id,
+  });
+  const bookingsCount = await bookingCollection.countDocuments({
+    customerId: id,
+  });
 
   res.json({
     ...user,
@@ -623,10 +782,13 @@ app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
   const { isBlocked } = req.body;
   await userCollection.updateOne(
     { _id: new ObjectId(id) },
-    { $set: { isBlocked: Boolean(isBlocked), updatedAt: new Date() } }
+    { $set: { isBlocked: Boolean(isBlocked), updatedAt: new Date() } },
   );
 
-  res.json({ success: true, message: `user block status updated to ${isBlocked}` });
+  res.json({
+    success: true,
+    message: `user block status updated to ${isBlocked}`,
+  });
 });
 
 app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
@@ -639,6 +801,154 @@ app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   res.json({ success: true, message: "user deleted successfully" });
 });
 
+app.post("/users/sync-role", async (req, res) => {
+  const { email, role } = req.body;
+  if (!email || !role) {
+    return res.status(400).json({ message: "email and role are required" });
+  }
+  const normalizedRole = role.toLowerCase();
+  if (!["customer", "vendor"].includes(normalizedRole)) {
+    return res.status(400).json({ message: "invalid role" });
+  }
+  const existingUser = await userCollection.findOne({ email });
+  if (existingUser && existingUser.role === "admin") {
+    return res.json({ success: true, message: "admin role preserved" });
+  }
+  await userCollection.updateOne(
+    { email },
+    { $set: { role: normalizedRole, updatedAt: new Date() } },
+  );
+  res.json({ success: true, message: `role synced to ${normalizedRole}` });
+});
+
+app.post("/payments/verify-session", async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res
+      .status(400)
+      .json({ success: false, message: "session ID is required" });
+  }
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (!session) {
+      return res
+        .status(404)
+        .json({ success: false, message: "session not found" });
+    }
+    res.json({
+      success: true,
+      status: session.status,
+      payment_status: session.payment_status,
+      amount_total: session.amount_total,
+      currency: session.currency,
+      customer_email: session.customer_email || session.customer_details?.email,
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, message: "invalid stripe session" });
+  }
+});
+
+app.post(
+  "/payments/cancel-subscription",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    const userId = req.user.id;
+    let query = {};
+    if (ObjectId.isValid(userId)) {
+      query = { _id: new ObjectId(userId) };
+    } else if (req.user.email) {
+      query = { email: req.user.email };
+    } else {
+      return res.status(400).json({ message: "invalid user identifier" });
+    }
+
+    const user = await userCollection.findOne(query);
+    if (!user) {
+      return res.status(404).json({ message: "user not found" });
+    }
+
+    await userCollection.updateOne(query, {
+      $set: {
+        premium: false,
+        subscriptionPlan: "Free",
+        subscriptionExpiresAt: null,
+        updatedAt: new Date(),
+      },
+    });
+
+    await transactionCollection.insertOne({
+      vendorId: user._id.toString(),
+      customer_email: user.email,
+      plan: "Free",
+      amount: 0,
+      currency: "usd",
+      status: "cancelled",
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      message: "subscription cancelled and reverted to Free plan",
+    });
+  },
+);
+
+app.post("/payments/webhook", async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  let event;
+
+  try {
+    if (webhookSecret && sig) {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } else {
+      event = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    }
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event?.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const userId = session.metadata?.userId;
+    const customerEmail =
+      session.customer_email || session.customer_details?.email;
+    let query = {};
+    if (userId && ObjectId.isValid(userId)) {
+      query = { _id: new ObjectId(userId) };
+    } else if (userId) {
+      query = { _id: userId };
+    } else if (customerEmail) {
+      query = { email: customerEmail };
+    }
+
+    if (Object.keys(query).length > 0) {
+      await userCollection.updateOne(query, {
+        $set: {
+          premium: true,
+          subscriptionPlan: "Premium",
+          subscriptionExpiresAt: null,
+          updatedAt: new Date(),
+        },
+      });
+
+      await transactionCollection.insertOne({
+        vendorId: userId || "",
+        customer_email: customerEmail || "",
+        sessionId: session.id,
+        amount: session.amount_total ? session.amount_total / 100 : 150,
+        currency: session.currency || "usd",
+        plan: session.metadata?.plan || "Platinum Signature",
+        status: "completed",
+        createdAt: new Date(),
+      });
+    }
+  }
+
+  res.json({ received: true });
+});
+
 app.post("/payments/checkout-verify", async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -646,7 +956,7 @@ app.post("/payments/checkout-verify", async (req, res) => {
     if (!sessionId) {
       return res.send({
         success: false,
-        message: "Session ID is required"
+        message: "Session ID is required",
       });
     }
 
@@ -660,8 +970,31 @@ app.post("/payments/checkout-verify", async (req, res) => {
       metadata,
       payment_intent,
       amount_total,
-      currency
+      currency,
     } = session;
+
+    const userId = metadata?.userId;
+    let query = {};
+    if (userId && ObjectId.isValid(userId)) {
+      query = { _id: new ObjectId(userId) };
+    } else if (userId) {
+      query = { _id: userId };
+    } else if (customer_email || customer_details?.email) {
+      query = { email: customer_email || customer_details?.email };
+    }
+
+    const targetUser = await userCollection.findOne(query);
+    if (
+      targetUser &&
+      targetUser.role &&
+      targetUser.role.toLowerCase() !== "vendor" &&
+      targetUser.role.toLowerCase() !== "admin"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "only vendors can purchase subscriptions",
+      });
+    }
 
     if (status === "complete" && payment_status === "paid") {
       const sessionQuery = { sessionId };
@@ -682,8 +1015,8 @@ app.post("/payments/checkout-verify", async (req, res) => {
             amount_total,
             currency,
             plan: metadata?.plan || "Platinum Signature",
-            payment_intent
-          }
+            payment_intent,
+          },
         });
       }
 
@@ -694,28 +1027,18 @@ app.post("/payments/checkout-verify", async (req, res) => {
         customer_email: customer_email || customer_details?.email || "",
         userId: metadata?.userId || "",
         payment_date: new Date(),
-        payment_intent
+        payment_intent,
       };
 
       const result = await paymentCollection.insertOne(payment);
-
-      const userId = metadata?.userId;
-      let query = {};
-      if (userId && ObjectId.isValid(userId)) {
-        query = { _id: new ObjectId(userId) };
-      } else if (userId) {
-        query = { _id: userId };
-      } else if (customer_email || customer_details?.email) {
-        query = { email: customer_email || customer_details?.email };
-      }
 
       const updatedDoc = {
         $set: {
           premium: true,
           subscriptionPlan: "Premium",
-          subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-          updatedAt: new Date()
-        }
+          subscriptionExpiresAt: null,
+          updatedAt: new Date(),
+        },
       };
 
       const updateResult = await userCollection.updateOne(query, updatedDoc);
@@ -728,7 +1051,7 @@ app.post("/payments/checkout-verify", async (req, res) => {
         currency: currency || "usd",
         plan: metadata?.plan || "Platinum Signature",
         status: "completed",
-        createdAt: new Date()
+        createdAt: new Date(),
       });
 
       return res.send({
@@ -744,21 +1067,21 @@ app.post("/payments/checkout-verify", async (req, res) => {
           amount_total,
           currency,
           plan: metadata?.plan || "Platinum Signature",
-          payment_intent
-        }
+          payment_intent,
+        },
       });
     }
 
     res.send({
       success: false,
-      message: "Payment verification failed"
+      message: "Payment verification failed",
     });
   } catch (error) {
     console.error("Payment verification error:", error);
 
     res.status(500).send({
       success: false,
-      message: "Internal server error"
+      message: "Internal server error",
     });
   }
 });
@@ -766,77 +1089,100 @@ app.post("/payments/checkout-verify", async (req, res) => {
 app.get("/transactions", verifyToken, async (req, res) => {
   const isAdmin = req.user.role === "admin";
   const query = isAdmin ? {} : { vendorId: req.user.id };
-  const result = await transactionCollection.find(query).sort({ createdAt: -1 }).toArray();
+  const result = await transactionCollection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
   res.json(result);
 });
 
-app.get("/vendor/stats/:vendorId", verifyToken, verifyVendor, async (req, res) => {
-  const { vendorId } = req.params;
-  if (req.user.role !== "admin" && req.user.id !== vendorId && req.user.email !== vendorId) {
-    return res.status(403).json({ message: "forbidden access" });
-  }
+app.get(
+  "/vendor/stats/:vendorId",
+  verifyToken,
+  verifyVendor,
+  async (req, res) => {
+    const { vendorId } = req.params;
+    if (
+      req.user.role !== "admin" &&
+      req.user.id !== vendorId &&
+      req.user.email !== vendorId
+    ) {
+      return res.status(403).json({ message: "forbidden access" });
+    }
 
-  const totalServices = await serviceCollection.countDocuments({
-    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
-  });
-  const activeServices = await serviceCollection.countDocuments({
-    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
-    status: { $regex: /^active$/i },
-  });
-  const pendingBookings = await bookingCollection.countDocuments({
-    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
-    status: { $regex: /^pending$/i },
-  });
-  const acceptedBookings = await bookingCollection.countDocuments({
-    $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
-    status: { $regex: /^accepted$/i },
-  });
+    const totalServices = await serviceCollection.countDocuments({
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+    });
+    const activeServices = await serviceCollection.countDocuments({
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+      status: { $regex: /^active$/i },
+    });
+    const pendingBookings = await bookingCollection.countDocuments({
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+      status: { $regex: /^pending$/i },
+    });
+    const acceptedBookings = await bookingCollection.countDocuments({
+      $or: [{ vendorId: vendorId }, { vendorEmail: req.user.email }],
+      status: { $regex: /^accepted$/i },
+    });
 
-  const vendorUser = await userCollection.findOne({
-    $or: [
-      ObjectId.isValid(vendorId) ? { _id: new ObjectId(vendorId) } : null,
-      { email: req.user.email },
-    ].filter(Boolean),
-  });
+    const vendorUser = await userCollection.findOne({
+      $or: [
+        ObjectId.isValid(vendorId) ? { _id: new ObjectId(vendorId) } : null,
+        { email: req.user.email },
+      ].filter(Boolean),
+    });
 
-  res.json({
-    totalServices,
-    activeServices,
-    pendingBookings,
-    acceptedBookings,
-    subscriptionPlan: vendorUser?.subscriptionPlan || (vendorUser?.premium ? "Premium" : "Free"),
-  });
-});
+    res.json({
+      totalServices,
+      activeServices,
+      pendingBookings,
+      acceptedBookings,
+      subscriptionPlan:
+        vendorUser?.subscriptionPlan ||
+        (vendorUser?.premium ? "Premium" : "Free"),
+    });
+  },
+);
 
-app.get("/customer/stats/:customerId", verifyToken, verifyCustomer, async (req, res) => {
-  const { customerId } = req.params;
-  if (req.user.role !== "admin" && req.user.id !== customerId && req.user.email !== customerId) {
-    return res.status(403).json({ message: "forbidden access" });
-  }
+app.get(
+  "/customer/stats/:customerId",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    const { customerId } = req.params;
+    if (
+      req.user.role !== "admin" &&
+      req.user.id !== customerId &&
+      req.user.email !== customerId
+    ) {
+      return res.status(403).json({ message: "forbidden access" });
+    }
 
-  const totalBookings = await bookingCollection.countDocuments({
-    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
-  });
-  const pendingBookings = await bookingCollection.countDocuments({
-    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
-    status: { $regex: /^pending$/i },
-  });
-  const acceptedBookings = await bookingCollection.countDocuments({
-    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
-    status: { $regex: /^accepted$/i },
-  });
-  const rejectedBookings = await bookingCollection.countDocuments({
-    $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
-    status: { $regex: /^rejected$/i },
-  });
+    const totalBookings = await bookingCollection.countDocuments({
+      $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+    });
+    const pendingBookings = await bookingCollection.countDocuments({
+      $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+      status: { $regex: /^pending$/i },
+    });
+    const acceptedBookings = await bookingCollection.countDocuments({
+      $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+      status: { $regex: /^accepted$/i },
+    });
+    const rejectedBookings = await bookingCollection.countDocuments({
+      $or: [{ customerId: customerId }, { customerEmail: req.user.email }],
+      status: { $regex: /^rejected$/i },
+    });
 
-  res.json({
-    totalBookings,
-    pendingBookings,
-    acceptedBookings,
-    rejectedBookings,
-  });
-});
+    res.json({
+      totalBookings,
+      pendingBookings,
+      acceptedBookings,
+      rejectedBookings,
+    });
+  },
+);
 
 app.patch("/users/profile/:id", verifyToken, async (req, res) => {
   const { id } = req.params;
@@ -848,7 +1194,9 @@ app.patch("/users/profile/:id", verifyToken, async (req, res) => {
   const isAdmin = req.user.role === "admin";
 
   if (!isSelf && !isAdmin) {
-    return res.status(403).json({ message: "forbidden: cannot modify profile of other users" });
+    return res
+      .status(403)
+      .json({ message: "forbidden: cannot modify profile of other users" });
   }
 
   const { name, image, businessName, phone, location, bio } = req.body;
