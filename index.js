@@ -169,6 +169,17 @@ app.get("/services/:id", verifyToken, async (req, res) => {
     _id: new ObjectId(serviceId),
   });
   if (result) {
+    const serviceStatus = (result.status || "").toLowerCase();
+    const isOwner =
+      req.user.id === result.vendorId ||
+      req.user.email === result.vendorEmail ||
+      (result.vendorId && String(result.vendorId) === String(req.user.id));
+    const isAdmin = req.user.role === "admin";
+    if (serviceStatus !== "active" && !isOwner && !isAdmin) {
+      return res.status(403).json({
+        message: "service is currently pending approval and not publicly accessible",
+      });
+    }
     if (result.vendorId) {
       let vendorUser = null;
       if (ObjectId.isValid(result.vendorId)) {
@@ -657,11 +668,49 @@ app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
   });
   const totalTransactions = await transactionCollection.countDocuments({});
 
-  const recentTransactions = await transactionCollection
+  const recentTransactionsRaw = await transactionCollection
     .find({})
     .sort({ createdAt: -1 })
     .limit(5)
     .toArray();
+
+  const userIds = [];
+  const userEmails = [];
+  for (const tx of recentTransactionsRaw) {
+    if (tx.vendorId && ObjectId.isValid(tx.vendorId)) {
+      userIds.push(new ObjectId(tx.vendorId));
+    }
+    const email = tx.vendorEmail || tx.customer_email;
+    if (email) userEmails.push(email);
+  }
+
+  const matchedUsers = await userCollection
+    .find({
+      $or: [
+        userIds.length > 0 ? { _id: { $in: userIds } } : null,
+        userEmails.length > 0 ? { email: { $in: userEmails } } : null,
+      ].filter(Boolean),
+    })
+    .toArray();
+
+  const userById = new Map();
+  const userByEmail = new Map();
+  for (const u of matchedUsers) {
+    userById.set(u._id.toString(), u);
+    if (u.email) userByEmail.set(u.email.toLowerCase(), u);
+  }
+
+  const recentTransactions = recentTransactionsRaw.map((tx) => {
+    const u =
+      userById.get(tx.vendorId) ||
+      (tx.customer_email && userByEmail.get(tx.customer_email.toLowerCase())) ||
+      (tx.vendorEmail && userByEmail.get(tx.vendorEmail.toLowerCase()));
+    return {
+      ...tx,
+      vendorName: tx.vendorName || u?.name || "Wedding Vendor",
+      vendorEmail: tx.vendorEmail || tx.customer_email || u?.email || "",
+    };
+  });
 
   res.json({
     totalUsers,
@@ -890,6 +939,8 @@ app.post(
 
     await transactionCollection.insertOne({
       vendorId: user._id.toString(),
+      vendorName: user.name || "Wedding Vendor",
+      vendorEmail: user.email,
       customer_email: user.email,
       plan: "Free",
       amount: 0,
@@ -935,6 +986,7 @@ app.post("/payments/webhook", async (req, res) => {
     }
 
     if (Object.keys(query).length > 0) {
+      const matchedUser = await userCollection.findOne(query);
       await userCollection.updateOne(query, {
         $set: {
           premium: true,
@@ -945,8 +997,10 @@ app.post("/payments/webhook", async (req, res) => {
       });
 
       await transactionCollection.insertOne({
-        vendorId: userId || "",
-        customer_email: customerEmail || "",
+        vendorId: userId || (matchedUser?._id ? matchedUser._id.toString() : ""),
+        vendorName: matchedUser?.name || "Wedding Vendor",
+        vendorEmail: customerEmail || matchedUser?.email || "",
+        customer_email: customerEmail || matchedUser?.email || "",
         sessionId: session.id,
         amount: session.amount_total ? session.amount_total / 100 : 150,
         currency: session.currency || "usd",
@@ -1055,8 +1109,10 @@ app.post("/payments/checkout-verify", async (req, res) => {
       const updateResult = await userCollection.updateOne(query, updatedDoc);
 
       await transactionCollection.insertOne({
-        vendorId: metadata?.userId || "",
-        customer_email: customer_email || customer_details?.email || "",
+        vendorId: metadata?.userId || (targetUser?._id ? targetUser._id.toString() : ""),
+        vendorName: targetUser?.name || customer_details?.name || "Wedding Vendor",
+        vendorEmail: customer_email || customer_details?.email || targetUser?.email || "",
+        customer_email: customer_email || customer_details?.email || targetUser?.email || "",
         sessionId,
         amount: amount_total ? amount_total / 100 : 150,
         currency: currency || "usd",
@@ -1099,11 +1155,58 @@ app.post("/payments/checkout-verify", async (req, res) => {
 
 app.get("/transactions", verifyToken, async (req, res) => {
   const isAdmin = req.user.role === "admin";
-  const query = isAdmin ? {} : { vendorId: req.user.id };
-  const result = await transactionCollection
+  const query = isAdmin
+    ? {}
+    : {
+        $or: [
+          { vendorId: req.user.id },
+          { vendorEmail: req.user.email },
+          { customer_email: req.user.email },
+        ],
+      };
+  const rawList = await transactionCollection
     .find(query)
     .sort({ createdAt: -1 })
     .toArray();
+
+  const userIds = [];
+  const userEmails = [];
+  for (const tx of rawList) {
+    if (tx.vendorId && ObjectId.isValid(tx.vendorId)) {
+      userIds.push(new ObjectId(tx.vendorId));
+    }
+    const email = tx.vendorEmail || tx.customer_email;
+    if (email) userEmails.push(email);
+  }
+
+  const matchedUsers = await userCollection
+    .find({
+      $or: [
+        userIds.length > 0 ? { _id: { $in: userIds } } : null,
+        userEmails.length > 0 ? { email: { $in: userEmails } } : null,
+      ].filter(Boolean),
+    })
+    .toArray();
+
+  const userById = new Map();
+  const userByEmail = new Map();
+  for (const u of matchedUsers) {
+    userById.set(u._id.toString(), u);
+    if (u.email) userByEmail.set(u.email.toLowerCase(), u);
+  }
+
+  const result = rawList.map((tx) => {
+    const u =
+      userById.get(tx.vendorId) ||
+      (tx.customer_email && userByEmail.get(tx.customer_email.toLowerCase())) ||
+      (tx.vendorEmail && userByEmail.get(tx.vendorEmail.toLowerCase()));
+    return {
+      ...tx,
+      vendorName: tx.vendorName || u?.name || "Wedding Vendor",
+      vendorEmail: tx.vendorEmail || tx.customer_email || u?.email || "",
+    };
+  });
+
   res.json(result);
 });
 
@@ -1194,6 +1297,42 @@ app.get(
     });
   },
 );
+
+app.get("/users/profile/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  let query = {};
+  if (ObjectId.isValid(id)) {
+    query = { _id: new ObjectId(id) };
+  } else if (id && id.includes("@")) {
+    query = { email: id };
+  } else {
+    query = { $or: [{ _id: id }, { email: req.user.email }] };
+  }
+  const isSelf =
+    req.user.id === id ||
+    req.user.email === id ||
+    req.user.email === req.params.id;
+  const isAdmin = req.user.role === "admin";
+  if (!isSelf && !isAdmin) {
+    return res.status(403).json({ message: "forbidden access to user details" });
+  }
+  const user = await userCollection.findOne(query);
+  if (!user) {
+    return res.status(404).json({ message: "user not found" });
+  }
+  res.json({
+    _id: user._id,
+    id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    image: user.image,
+    premium: Boolean(user.premium),
+    subscriptionPlan: user.subscriptionPlan || (user.premium ? "Premium" : "Free"),
+    isBlocked: Boolean(user.isBlocked),
+    createdAt: user.createdAt,
+  });
+});
 
 app.patch("/users/profile/:id", verifyToken, async (req, res) => {
   const { id } = req.params;
